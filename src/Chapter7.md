@@ -528,8 +528,172 @@ func main() {
 }
 ```
 
-## A Qyucj Lesson on Interfaces
-## Interfaces Are Type-Safe Duck Typing
+## A Quick Lesson on Interfaces
+虽然Golang的[并发模型](chapter12)设计十分优秀，但Go设计的真正亮点在于他的 **隐式接口 *Implicit Interface*** ，这是Go中唯一的抽象类型。
+
+对于接口的声明同样使用关键字`type`，那么目前已知`type`可用于声明结构体、自定义类型与接口。接口内的方法构成了接口的方法集。同时，如前文所述，指针实例的方法集包括指针接收器与值接收器方法，而变量实例的方法集只包括值接收器方法：
+```go
+type Stringer interface{
+    String()    string 
+}
+type Incrementer interface{
+    Increment()
+}
+
+type Counter struct{
+    total int
+    lastUpdated time.Time
+}
+
+func (c *Counter) Increment() {
+    c.total++
+    c.lastUpdated = time.Now()
+} 
+
+func (c Counter) String() string {
+    return fmt.Sprintf("total: %d, last updated: %v",c.total,c.lastUpdated)
+}
+
+var myStringer fmt.Stringer
+var myIncrementer Incrementer
+
+pointerCounter := &Conunter{}
+valueCounter := Counter{}
+
+myStringer = pointerCounter     // ok
+myStringer = valueCounter       // ok 
+myIncrementer = pointerCounter  // ok 
+myIncrementer = valueCounter    // cannot use valueCounter (variable of type Counter) as Incrementer value in assignment: Counter does not implement Incrementer (method Increment has pointer receiver)
+```
+与其他类型相同，接口也可以被声明在任何级别的块中，接口通常以"-er"结尾，比如`fmt.Stringer`、`io.Reader`、`io.Closer`、`io.ReadCloser`、`json.Marshaler`、`http.Handler`等。
+
+## 接口时类型安全与鸭子类型 *Interfaces Are Type-Safe Duck Typing*
+目前为止，Go 语言的接口机制与其他语言相比并无很大区别，真正不同的是Go语言接口的 **隐式实现 *implemented implicitly***，上一节中的`Counter`结构体并没有显式地声明实现了`Incrementer`接口，即在Go中：*一个具体的类型实现了接口中的全部方法，就认为该类型实现了接口*。
+
+这种隐式行为使得接口成为 Go 语言类型系统中最精妙的设计，因为它同时实现了**类型安全与解耦**，既保留了静态语言的类型检查安全性，又结合了动态语言灵活适配类型的灵活性。
+- 类型安全： Go 是静态类型语言，编译器在编译过程中进行类型检查，当你将一个具体类型(Counter)赋值给接口类型(Incrementer)时，编译器会严格检查这个类型是否真的包含了接口要求的所有方法。 若没有满足全部方法，编译器会立即报错，这保证了在运行时通过接口变量调用的方法是一定存在的，并且参数与返回值类型均匹配，避免了动态语言中常见的“方法未找到”或“类型错误”的运行时异常，这就是编译时的**类型安全**
+- 解耦： 接口定义了的是契约，即一组方法签名，声明了“需要什么能力”，而非“如何提供能力”或“由谁提供这个能力”。这种“按行为匹配类型”的方式非常灵活，允许你编写通用的代码来处理不同的类型，只要它们行为一致（方法相同）。你不需要复杂的继承体系或提前声明类型关系。
+
+前文提到过 *Design Patterns* 中“优先使用组合而非继承”的观点，他的另一个观点是 **“针对接口编程，而非针对实现”**。这样做可以依赖于行为，而非具体的实现动作，可以根据行为切换实现，使带个能够根据需求不可避免的变化而不断演进。
+
+像Python，Ruby与JavaScript等动态类型语言并没有接口机制，但他们可以使用“鸭子类型” *duck typing*，即“如果它走起来像鸭子，叫起来像鸭子，那么它就是鸭子”。其概念是，将类型的实例作为参数传递给函数，只要该函数可以找到它期望调用的方法：
+```py
+class Logic:
+    def process(self,data):
+        # business logic
+def program(logic):
+    # get data from somewhere
+    logic.process(data)
+    
+logicToUse = Logic()
+program(logicToUse)
+```
+鸭子类型乍一听可能有点奇怪，但它已被用于构建大型且成功的系统。如果你使用静态类型语言编程，这听起来会非常混乱。如果没有明确指定类型，就很难确切知道应该实现哪些功能。当新开发人员加入项目，或者现有开发人员忘记代码的功能时，他们必须追溯代码才能确定实际的依赖关系。
+
+Java 开发者使用不同的模式。他们定义一个接口，创建该接口的实现，但只在客户端代码中引用该接口：
+```java
+public interface Logic {
+    String process(String data);
+}
+public class LogicImpl implements Logic {
+    public String process(String data){
+        // business logic
+    }
+}
+
+public class Client {
+    private final Logic logic;
+
+    public Client(Logic logic) {
+        this.logic = logic
+    }
+
+    public void program() {
+        // get data from somewhere
+        this.logic.process(data);
+    }
+}
+
+public static void main(String[] args){
+    Logic logic = new LogicImpl();
+    Client client = new Client(logic);
+    client.program();
+}
+```
+Go 的开发者认为这两组人都是对的。如果你的应用程序会随着时间的推移而增长和变化，你需要灵活地更改实现。然而，为了让人们理解你的代码在做什么（因为随着时间的推移，会有新的人使用相同的代码），你还需要指定代码依赖的内容。这就是隐式接口的用武之地。Go 代码是前两种风格的融合。
+```go
+type LogicProvider struct{}
+
+func (lp LogicProvider) Process(data string) string{
+    //business logic
+}
+
+type Logic interface{
+    Process(data string) string 
+}
+
+type Client struct{
+    L Logic
+}
+
+func (c Client) Program(){
+    // get data from somewhere
+    c.L.Process(data)
+}
+
+func main(){
+    c := Client{
+        L: LogicProvider{},
+    }
+    c.Program()
+}
+```
+Go 代码提供的`Logic` 接口，只有调用者（`client`）了解，虽然`LogicProvider`上没有任何声明，但他允许创建一个新的logic provider，同时保证任何传入客户端的类型都满足client的需求 ==> **接口指定调用者需要什么，客户端通过接口指定所需功能**
+
+Go 的标准库中有些用于输入输出的接口，使用标准接口最好使用**装饰器模式**。在Go 中，***编写工厂函数接收一个接口的实例，并返回另一个实现相同接口的类型使很常见的***，比如：
+```go
+func process(r io.Reader) error
+
+func getError() error {
+    r,err := os.Open(fileName)
+    if err != nil{
+        return err 
+    }
+    defer r.Close()
+
+    return process(r)
+}
+```
+这个例子中，`op.Open`返回值满足`io.Reader`的接口，并可以读取任何代码中的data，如果文件值gzip压缩的，你可以在一个`io.Reader`中包装另一个`io.Reader`
+```go
+r,err := os.Open(fileName)
+if err != nil{
+    return err
+}
+defer r.CLose()
+
+gz,err := gzip.NewReader(r)
+if err != nil{
+    return err 
+}
+defer gz.Close()
+
+return process(gz)
+```
+上述代码实现了从未压缩文件中读取的代码，再从压缩文件中读取一遍，`os.Open()`的返回值与`gzip.NewReader()`的入参均满足`io.Reader`的接口。如果标准库中的接口描述了你的代码所需的功能，**尽情使用它吧！** 常用的接口包括 io.Reader、io.Writer 和 io.Closer。
+
+对于满足接口的类型来说，指定不属于该接口的额外方法是完全没问题的。一部分客户端代码可能不关心这些方法，但其他代码则关心。例如，io.File 类型也满足 io.Writer 接口。如果您的代码只关心从文件中读取数据，请使用 io.Reader 接口来引用文件实例，并忽略其他方法。haoel分享过一个接口的**完整性检查**方法：将变量的空指针赋值给接口，若变量已经满足接口则不会报错，若不满足则在编译时就会报错。
+```go
+var _ Interface = (*StructType)(nil)
+```
+
+
+
+
+
+
+
+
 ## Embedding and Interfaces
 ## Accept Interfaces, Return Structs
 ## Interfaces and nil 

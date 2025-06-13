@@ -686,18 +686,161 @@ return process(gz)
 ```go
 var _ Interface = (*StructType)(nil)
 ```
+##  嵌入与接口 Embedding and Interfaces
+不仅结构体可以相互嵌入，接口同样可以相互嵌入，比如`io.ReadCloser`接口就基于`io.Reader`接口与`io.Closer`接口
+```go
+type Reader interface{
+    Read(p []byte) (n int,err error)
+}
+
+type Closer interface {
+    Closer() error
+}
+
+type ReadCloser interface{
+    Reader
+    Closer
+}
+```
+接口甚至还可以嵌入到结构体中，具体见[Using Stubs in Go](Page397)
+
+## 接口作参数，结构体作返回值 *Accept Interfaces, Return Structs*
+"Accept interfaces, return structs"这句话最早出自于Jack Lindamood在2016年的博客[Premptive Interface Anti-Pattern in Go](https://medium.com/@cep21/preemptive-interface-anti-pattern-in-go-54c18ac0668a)
+。他的大致意思是**依赖抽象接口进行调用，但返回具体的实现**。
+- 函数内部调用的业务逻辑应该通过接口进行：当函数内部需要调用其他组件（如服务、存储、外部API等）来完成工作时，不应该直接以来具体的实现类型，而是应该依赖这些组件所实现的接口
+    - 函数只需要关心接口定义的行为，而无需关心具体哪个结构体实现或如何实现。这使得可以轻松更换底层实现（就像`cryptoalgo`可以是`ecdsaImpl`实现也可以是`rsaImpl`实现）
+    - 在测试时，可以为这些接口创建`Mock`或`Stub`实现，从而隔离被测函数，只测试自身逻辑。 **Mock，Stub？？**
+    ```go
+    // 依赖接口 UserRepository，而不是具体的 *MySQLUserReporisitory 或 *InMemoryUserRepository
+    func GetUserByID(repo UserRepository, id int) (*User, error) {
+        // 业务通过接口调用
+        return repo.GetByID(id)
+    }
+
+    type UserRepository interface {
+        GetByID(id int) (*User, error)
+        Save(user *User) (error)
+        // ... other methods
+    }
+    ```
+- 函数的输出应该是一个具体类型：当函数需要返回数据或结果时，应该返回的具体的结构体类型或基础类型，而非接口
+    - 调用者只需要依赖函数返回的具体类型，不需要满足这个类型实现的接口定义，如果返回接口，那么所有的调用者都必须满足接口，即便可能只需要具体结构体中的某个字段
+    - 避免接口污染，不需要为每个返回的对象都定义一个专门的接口，让API更清晰、直接，减少了代码的抽象和复杂性
+    ```go
+    type User struct{
+        ID      int
+        Name    string
+        Email   string
+    }
+
+    func CreateUser(repo UserRepository, name string, email string) (*User, error) {
+        newUser := &User{Name: name, Email: email}
+        err := repo.Save(newUser)
+        if err != nil{
+            return nil,err
+        }
+        return newUser, nil
+    }
+    ```
+*Accept Interfaces, Return Structs* 是Go 社区广泛认可的最佳实践，它平衡了抽象和解耦的需求（通过接口参数）与 API 的清晰性和使用便利性（通过返回具体类型）。同时充分利用了 Go 隐式接口的特性：调用方可以轻松地将函数返回的具体类型赋值给自己需要的接口（如果类型匹配），而函数本身不需要关心或定义这些接口。它还让模块间的边界更清晰：函数声明了它需要的外部依赖（接口入参），并提供了明确的产出（具体类型返回值）。
+
+但是在极少数情况下，*接口中的方法不得已返回另一个接口*，比如标准库中`database/sql/driver`包定义的一组公共接口（如`Driver`、`Conn`、`Stmt`、`Result`、`Rows`等）中的方法，其返回值通常是其他接口，这种设计主要是为了：
+- 解耦具体实现：数据库驱动开发者只需要实现接口，而不需要依赖具体的实现类型
+- 隐藏底层细节：调用方（如`database/sql`包）仅通过接口与驱动交互，无需关心驱动内部的具体类型
+> 数据库驱动开发者：
+> 指的是为特定数据库系统（如MySQL、PostgreSQL、SQLite、Oracle 等）编写Go语言连接驱动程序的开发者或团队，他们是连接GO 标准数据库抽象层（database/sql）和具体数据库系统（MySQL、PG, etc.）的桥梁，通过精确实现`databse/sql/driver`定义的接口，是的用户可以使用统一的标准库API操作不同的数据库。他们虽然不是标准库的核心团队，但是作为第三方开发者，维护如`github.com/go-sql-driver/mysql`或`github.com/lib/pq`这些流行的数据库驱动库。
+
+但是，Go在后续发展（1.8）中，需要为数据库驱动增加新功能，但为了保证**向后兼容**，既不能修改现有接口，又不能修改现有方法，此时唯一的解决方案就是：
+1. 保留旧接口，不修改原有接口及其方法（如`driver.Conn`接口）
+2. 新增接口，在新接口中实现新功能的方法（如`driver.ConnPrepareContext`接口）
+3. 驱动作者同时实现新旧接口，具体类型需同时实现新旧接口（如`driver.Conn`与`driver.ConnPrepareContext`接口）
+```go
+// Go1.0 旧接口
+type Conn interface {
+    Prepare(query string) (Stmt, error)
+}
+// Go1.8 新增接口
+type ConnPrepareContext interface {
+    PrepareContext(ctx context.Context, query string) (Stmt,error)
+}
+
+// 驱动实现
+type MyConn struct {}
+func (m *MyConn) Prepare(query string) (Stmt, error) {/**/}
+func (m *MyConn) PrepareContext(ctx context.Context, query string) (Stmt, error) {/**/}
+```
+
+这就引出了一个问题：如何检查这些新方法是否存在？以及如果存在，如何访问它们？在[Type Assertions and Type Switches](P167)中又说明
+
+> deepseek 偷学的**类型断言检查**：
+> ```go
+> if connCtx, ok := conn.(driver.ConnPrepareContext);ok{
+>   // 使用新接口    
+> } else{
+>   // 回退到旧接口    
+> }
+> ```
+> 既满足了向后兼容，使旧驱动无须修改，又可以通过扩展而非修改实现新功能；
+> 
+> 就是可能驱动开发者需要实现更多接口，且调用者需处理类型断言和回退逻辑
+
+**工厂函数的返回值选择：**
+
+工厂设计模式中，在设计工厂函数时，为每种具体类型提供独立的工厂函数（如`NewFileLogger() *FileLogger`和 `NewDBLogger() *DBLogger`），而非统一返回Logger接口的`NewLogger(config) Logger`，避免编写一个返回接口类型的“万能工厂”（根据参数返回多种具体类型的接口）。
+
+但例外情况是：当**函数必须返回多种无法预知的异构类型**（如解析器返回多种Token类型）时，且这些类型**天然符合同意接口**时，返回接口是**唯一的可行方案**，如：
+```go
+type Token interface {
+    Type() string 
+}
+type NumberToken struct{}
+type StringToken struct{}
+
+func ParseToken(input string) Token {
+    if isNumber(input){
+        return &NumberToken{/**/}
+    }
+    return &StringToken{/**/}
+}
+```
+
+**错误处理的例外规则：**
+
+[`error`](chap9) 同样是这个返回值规则的一个例外，Go 强制规定**错误必须通过`error`接口类型返回**。因为错误的来源十分多样（文件 I/O 错误、网络错误、业务逻辑错误等），每种错误由不同具体类型实现（如 `os.PathError`, `net.OpError`, 自定义错误）。而接口时Go唯一支持的类型抽象机制，只有返回`error`接口才能统一处理所有错误类型
 
 
+**接口参数的性能权衡：**
+
+这种模式有一个潜在的缺点，如[Reducing the Garbage Collector's Workload](P136)中提到的：减少堆分配可以通过减少垃圾收集器的工作量来提高性能。虽然返回结构体可以避免堆分配，但是以接口作为参数的函数在被调用时，每个接口都会触发一次堆分配，这会影响程序的性能。因此在程序的整个生命周期中，一定要权衡好性能与可读/可维护性。如果因为接口参数的堆分配导致程序运行过慢，可以尝试重写该函数，以具体的类型作为参数，否则如果以接口的多个实现传递给函数，意味着需要创建多个包含重复逻辑的函数。
+
+拥有C++或Rust背景的开发者或许会通过泛型产生专门的函数，但在Go1.21中或许不会生成更快的代码，详情见 ["Idiomatic Go and Generics"](Page199)
+
+## 接口与nil *Interfaces and nil*
+
+在讨论[指针](chap6)时，讨论过指针类型的`nil`与零值。在接口中，同样可以使用`nil`表示零值，但与具体的类型又有一些不同：
+> 这有一篇关于iface与eface的详述：[理解Go interface的两种底层实现:iface和eface](https://blog.frognew.com/2018/11/go-interface-iface-eface.html)，深入后会有更多内容，不在此赘述
+
+Go的运行时*runtime*通过包含两个指针字段的结构体实现接口，一个指向值，一个指向值的类型。只要指向类型的指针非空，那么接口就是非空的。如果需要接口为空，那么两个指针均需要为空，如下所示：
+```go
+var pointerCounter *Counter
+fmt.Println(pointerCounter == nil)  // prints true
+
+var incrementer Incrementer
+fmt.Println(incrementer == nil)     //  prints true 
+
+incrementer = pointerCounter
+fmt.Println(incrementer == nil)     // prints false
+```
+
+## 接口是可比的 *Interfaces Are Comparable*
+第三章提到的[可比类型](chap3)可以通过`==`进行比较。你可能会惊讶于接口也是可比的，就像接口为空需要两个指针均为空一样，两个接口相等也需要两个指针相等。但是这产生了一个问题，如果指针的类型是不可比的呢？例子如下：
+```go
+type Double interface {
+    Double()
+}
+```
 
 
-
-
-
-
-## Embedding and Interfaces
-## Accept Interfaces, Return Structs
-## Interfaces and nil 
-## Interfaces Are Comparable
 ## The Empty Interface Says Nothing 
 ## Type Assertions and TypeSwitches
 ## Use TypesAssertions and TypeSwitches Sparingly
